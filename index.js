@@ -1,3 +1,4 @@
+
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -7,13 +8,57 @@ const {
 const P = require("pino");
 const axios = require("axios");
 const http = require("http");
+const QRCode = require("qrcode");
 
 const API_URL = process.env.API_URL ||
   "https://evil-engine-ui.vercel.app/api/generate";
 
+let qrImage = "";
+let connected = false;
+
 http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end("Evil GPT WhatsApp Bot is running");
+  res.writeHead(200, { "Content-Type": "text/html" });
+
+  res.end(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Evil GPT WhatsApp</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>
+        body {
+          background: #080d18;
+          color: white;
+          font-family: Arial;
+          text-align: center;
+          padding: 40px 15px;
+        }
+        .card {
+          background: #111b2d;
+          padding: 25px;
+          border-radius: 16px;
+          max-width: 350px;
+          margin: auto;
+        }
+        img {
+          width: 100%;
+          max-width: 280px;
+          background: white;
+          border-radius: 10px;
+        }
+        p { color: #b8c5d8; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h2>EVIL GPT</h2>
+        <p>${connected ? "WhatsApp Connected!" : "Scan with WhatsApp to connect"}</p>
+        ${connected ? "" : qrImage ? `<img src="${qrImage}">` : "<p>Waiting for QR code...</p>"}
+        <p>WhatsApp → Linked Devices → Link a Device</p>
+      </div>
+    </body>
+    </html>
+  `);
 }).listen(process.env.PORT || 3000);
 
 async function startBot() {
@@ -28,19 +73,23 @@ async function startBot() {
 
   sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on("connection.update", (update) => {
+  sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      console.log("Scan this QR code using WhatsApp:");
-      require("qrcode-terminal").generate(qr, { small: true });
+      qrImage = await QRCode.toDataURL(qr);
+      console.log("QR code ready on the website.");
     }
 
     if (connection === "open") {
+      connected = true;
+      qrImage = "";
       console.log("Evil GPT WhatsApp connected!");
     }
 
     if (connection === "close") {
+      connected = false;
+
       const shouldReconnect =
         lastDisconnect?.error?.output?.statusCode !==
         DisconnectReason.loggedOut;
@@ -63,10 +112,6 @@ async function startBot() {
       if (!text) continue;
 
       try {
-        await sock.sendMessage(msg.key.remoteJid, {
-          text: "⏳ Evil GPT is thinking..."
-        });
-
         const response = await axios.post(API_URL, {
           prompt: text
         });
