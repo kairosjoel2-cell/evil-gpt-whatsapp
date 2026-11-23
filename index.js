@@ -1,4 +1,3 @@
-
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -13,9 +12,10 @@ const API_URL = process.env.API_URL ||
   "https://evil-engine-ui.vercel.app/api/generate";
 
 let sock;
-let pairingCode = "";
 let connected = false;
 let requesting = false;
+let isRegistered = false;
+let socketStartedAt = 0;
 
 const page = () => `
 <!DOCTYPE html>
@@ -40,7 +40,7 @@ p{color:#b8c5d8}
 ${connected ? "<h3>WhatsApp Connected!</h3>" : `
 <input id="phone" placeholder="2348012345678" type="tel">
 <button onclick="getCode()">Get Pairing Code</button>
-<div id="code">${pairingCode}</div>
+<div id="code"></div>
 <p id="status">Enter your number with country code, without +.</p>
 `}
 </div>
@@ -57,7 +57,7 @@ async function getCode(){
   const data=await r.json();
   if(!r.ok) throw new Error(data.error || "Could not generate code");
   code.innerText=data.code;
-  status.innerText="Open WhatsApp → Linked Devices → Link with phone number.";
+  status.innerText="Enter this code immediately in WhatsApp → Linked Devices → Link with phone number.";
  }catch(e){status.innerText=e.message;}
 }
 </script>
@@ -65,30 +65,29 @@ async function getCode(){
 </html>
 `;
 
-http.createServer(async (req, res) => {
+http.createServer((req, res) => {
   if (req.method === "POST" && req.url === "/pair") {
     let body = "";
     req.on("data", chunk => body += chunk);
     req.on("end", async () => {
       try {
         const { phone } = JSON.parse(body);
-        if (!/^\d{10,15}$/.test(phone)) {
-          throw new Error("Enter a valid number with country code.");
+        if (typeof phone !== "string" || !/^\\d{10,15}$/.test(phone)) {
+          throw new Error("Use country code, without + or a leading 0.");
         }
-        if (!sock || connected) {
-          throw new Error("Bot is not ready for pairing.");
-        }
-        if (requesting) {
-          throw new Error("Please wait for the current request.");
+        if (!sock) throw new Error("WhatsApp is still starting. Wait 10 seconds and refresh.");
+        if (isRegistered || connected) throw new Error("This WhatsApp number is already linked to the bot.");
+        if (requesting) throw new Error("A code request is already running. Wait a moment.");
+        if (Date.now() - socketStartedAt < 5000) {
+          throw new Error("WhatsApp is still initializing. Wait 5 seconds and try again.");
         }
 
         requesting = true;
         const code = await sock.requestPairingCode(phone);
-        pairingCode = code;
-        res.writeHead(200, { "Content-Type": "application/json" });
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
         res.end(JSON.stringify({ code }));
       } catch (e) {
-        res.writeHead(400, { "Content-Type": "application/json" });
+        res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
         res.end(JSON.stringify({ error: e.message }));
       } finally {
         requesting = false;
@@ -97,25 +96,31 @@ http.createServer(async (req, res) => {
     return;
   }
 
-  res.writeHead(200, { "Content-Type": "text/html" });
+  res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
   res.end(page());
 }).listen(process.env.PORT || 3000);
 
 async function startBot() {
-  const { state, saveCreds } =
-    await useMultiFileAuthState("auth_info");
+  const { state, saveCreds } = await useMultiFileAuthState("auth_info");
+  isRegistered = Boolean(state.creds.registered);
 
   sock = makeWASocket({
     auth: state,
     logger: P({ level: "silent" }),
-    browser: ["Evil GPT", "Chrome", "1.0.0"]
+    browser: ["Evil GPT", "Chrome", "1.0.0"],
+    printQRInTerminal: false
   });
+  socketStartedAt = Date.now();
 
-  sock.ev.on("creds.update", saveCreds);
+  sock.ev.on("creds.update", async (update) => {
+    if (update.registered) isRegistered = true;
+    await saveCreds();
+  });
 
   sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
     if (connection === "open") {
       connected = true;
+      isRegistered = true;
       console.log("WhatsApp connected!");
     }
 
@@ -134,14 +139,14 @@ async function startBot() {
       if (!msg.message || msg.key.fromMe) continue;
       if (msg.key.remoteJid === "status@broadcast") continue;
 
-      const text =
+      const messageText =
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text;
 
-      if (!text) continue;
+      if (!messageText) continue;
 
       try {
-        const response = await axios.post(API_URL, { prompt: text });
+        const response = await axios.post(API_URL, { prompt: messageText });
         await sock.sendMessage(msg.key.remoteJid, {
           text: response.data.response || "I couldn't generate a response."
         });
