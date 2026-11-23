@@ -18,6 +18,26 @@ let requesting = false;
 let isRegistered = false;
 let socketStartedAt = 0;
 let latestQR = null;
+let qrWaiters = [];
+let starting = false;
+let connectionState = "starting";
+let lastError = null;
+let lastUpdateAt = null;
+
+function waitForQR(timeoutMs = 35000) {
+  if (latestQR) return Promise.resolve(latestQR);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      qrWaiters = qrWaiters.filter(fn => fn !== onQR);
+      reject(new Error("WhatsApp has not sent a QR challenge. Check /health for connection status."));
+    }, timeoutMs);
+    function onQR(qr) {
+      clearTimeout(timer);
+      resolve(qr);
+    }
+    qrWaiters.push(onQR);
+  });
+}
 
 const page = () => `
 <!DOCTYPE html>
@@ -96,6 +116,12 @@ function showQR(){
 `;
 
 http.createServer((req, res) => {
+  if (req.method === "GET" && req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    res.end(JSON.stringify({ ok: true, connected, connectionState, registered: isRegistered, qrReady: Boolean(latestQR), lastUpdateAt, lastError }));
+    return;
+  }
+
   if (req.method === "GET" && req.url === "/qr") {
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     if (!latestQR) {
@@ -128,6 +154,8 @@ http.createServer((req, res) => {
         }
 
         requesting = true;
+        // Baileys requires the connection challenge before requesting a pairing code.
+        await waitForQR();
         const code = await sock.requestPairingCode(phone);
         res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
         res.end(JSON.stringify({ code }));
@@ -147,6 +175,10 @@ http.createServer((req, res) => {
 }).listen(process.env.PORT || 3000);
 
 async function startBot() {
+  if (starting) return;
+  starting = true;
+  try {
+  console.log("[BOT] Starting WhatsApp socket...");
   const { state, saveCreds } = await useMultiFileAuthState("auth_info");
   isRegistered = Boolean(state.creds.registered);
 
@@ -164,16 +196,26 @@ async function startBot() {
   });
 
   sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
-    if (connection) console.log("WhatsApp connection state:", connection);
+    lastUpdateAt = new Date().toISOString();
+    if (connection) {
+      connectionState = connection;
+      console.log("WhatsApp connection state:", connection);
+    }
     if (qr) {
       latestQR = qr;
-      console.log("WhatsApp QR code is ready to scan.");
+      const waiters = qrWaiters;
+      qrWaiters = [];
+      for (const resolve of waiters) resolve(qr);
+      console.log("WhatsApp QR challenge received.");
     }
     if (lastDisconnect?.error) {
-      console.error("WhatsApp connection error:", lastDisconnect.error?.message || "Unknown connection error", "status:", lastDisconnect.error?.output?.statusCode || "n/a");
+      lastError = lastDisconnect.error?.message || "Unknown connection error";
+      console.error("WhatsApp connection error:", lastError, "status:", lastDisconnect.error?.output?.statusCode || "n/a");
     }
     if (connection === "open") {
       connected = true;
+      connectionState = "open";
+      lastError = null;
       isRegistered = true;
       latestQR = null;
       console.log("WhatsApp connected!");
@@ -181,6 +223,7 @@ async function startBot() {
 
     if (connection === "close") {
       connected = false;
+      connectionState = "close";
       latestQR = null;
       if (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
         startBot();
@@ -214,6 +257,13 @@ async function startBot() {
       }
     }
   });
+  } catch (error) {
+    connectionState = "error";
+    lastError = error.message;
+    console.error("[BOT STARTUP ERROR]", error);
+  } finally {
+    starting = false;
+  }
 }
 
 startBot();
