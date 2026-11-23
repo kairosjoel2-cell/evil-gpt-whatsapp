@@ -72,7 +72,7 @@ http.createServer((req, res) => {
     req.on("end", async () => {
       try {
         const { phone } = JSON.parse(body);
-        if (typeof phone !== "string" || !/^\\d{10,15}$/.test(phone)) {
+        if (typeof phone !== "string" || !/^\d{10,15}$/.test(phone)) {
           throw new Error("Use country code, without + or a leading 0.");
         }
         if (!sock) throw new Error("WhatsApp is still starting. Wait 10 seconds and refresh.");
