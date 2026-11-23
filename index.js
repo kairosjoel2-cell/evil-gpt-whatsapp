@@ -8,6 +8,7 @@ const P = require("pino");
 const axios = require("axios");
 const QRCode = require("qrcode");
 const http = require("http");
+const fs = require("fs/promises");
 
 const API_URL = process.env.API_URL ||
   "https://evil-engine-ui.vercel.app/api/generate";
@@ -23,6 +24,7 @@ let starting = false;
 let connectionState = "starting";
 let lastError = null;
 let lastUpdateAt = null;
+let reconnectTimer = null;
 
 function waitForQR(timeoutMs = 35000) {
   if (latestQR) return Promise.resolve(latestQR);
@@ -195,7 +197,7 @@ async function startBot() {
     await saveCreds();
   });
 
-  sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
+  sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
     lastUpdateAt = new Date().toISOString();
     if (connection) {
       connectionState = connection;
@@ -225,8 +227,26 @@ async function startBot() {
       connected = false;
       connectionState = "close";
       latestQR = null;
-      if (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
-        startBot();
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      if (sock && sock.ev) sock = null;
+
+      // A 401/logged-out session is invalid. Clear it before starting a fresh login.
+      if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+        try {
+          await fs.rm("auth_info", { recursive: true, force: true });
+          isRegistered = false;
+          console.log("[BOT] Rejected auth state cleared; fresh pairing is available.");
+        } catch (error) {
+          lastError = "Could not clear rejected auth state: " + error.message;
+          console.error(lastError);
+        }
+      }
+
+      if (!reconnectTimer) {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          startBot();
+        }, statusCode === DisconnectReason.loggedOut || statusCode === 401 ? 1500 : 4000);
       }
     }
   });
