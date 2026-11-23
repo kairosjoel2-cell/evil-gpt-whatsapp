@@ -87,6 +87,7 @@ http.createServer((req, res) => {
         res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
         res.end(JSON.stringify({ code }));
       } catch (e) {
+        console.error("Pairing request failed:", e?.message || "Unknown error", "status:", e?.output?.statusCode || "n/a");
         res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
         res.end(JSON.stringify({ error: e.message }));
       } finally {
@@ -106,7 +107,7 @@ async function startBot() {
 
   sock = makeWASocket({
     auth: state,
-    logger: P({ level: "silent" }),
+    logger: P({ level: "info" }),
     browser: ["Evil GPT", "Chrome", "1.0.0"],
     printQRInTerminal: false
   });
@@ -118,6 +119,10 @@ async function startBot() {
   });
 
   sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
+    if (connection) console.log("WhatsApp connection state:", connection);
+    if (lastDisconnect?.error) {
+      console.error("WhatsApp connection error:", lastDisconnect.error?.message || "Unknown connection error", "status:", lastDisconnect.error?.output?.statusCode || "n/a");
+    }
     if (connection === "open") {
       connected = true;
       isRegistered = true;
